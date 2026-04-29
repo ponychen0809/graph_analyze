@@ -1,171 +1,38 @@
 import random
 import itertools
+import math
+import time 
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, 
                              QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QTextEdit, QLabel, QSpinBox, QDoubleSpinBox)
-from PySide6.QtCore import Qt
+                             QPushButton, QTextEdit, QLabel, QSpinBox, QDoubleSpinBox,
+                             QProgressBar, QFrame)
+from PySide6.QtCore import Qt, QThread, Signal, QPoint
 from PySide6.QtGui import QPen, QFont, QPainter
 
 from graph_items import Node, Link
 
 # ==========================================
-# 主視窗 (MainWindow)
+# 背景執行緒：高效能優化版 (對稱性破缺 + 進度管理)
 # ==========================================
-class MainWindow(QMainWindow):
-    def __init__(self):
+class SearchWorker(QThread):
+    progress_updated = Signal(int, str) 
+    log_msg = Signal(str)               
+    search_finished = Signal(object, int, int, float) 
+
+    def __init__(self, k, edges_data, nodes, weights):
         super().__init__()
-        self.setWindowTitle("Python Graph Editor - 最佳平衡容錯分析 (自訂權重版)")
-        self.resize(1200, 750)
-        
-        self.nodes = [] 
-        self.edges_data = [] 
-        self.node_id_counter = 0
+        self.k = k
+        self.edges_data = edges_data
+        self.nodes = nodes
+        self.weights = weights
+        self._is_running = True 
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-
-        # --- 頂部按鈕區 (第一排) ---
-        top_layout = QHBoxLayout()
-        self.add_node_btn = QPushButton("新增節點 (+)")
-        self.add_node_btn.setFixedHeight(40)
-        self.add_node_btn.clicked.connect(self.add_new_node)
-        top_layout.addWidget(self.add_node_btn)
-
-        top_layout.addWidget(QLabel("  想要分幾組(K)："))
-        self.k_input = QSpinBox()
-        self.k_input.setRange(2, 5) 
-        self.k_input.setValue(2)
-        self.k_input.setFixedSize(60, 40)
-        top_layout.addWidget(self.k_input)
-
-        self.brute_force_btn = QPushButton("搜尋")
-        self.brute_force_btn.setFixedHeight(40)
-        self.brute_force_btn.setStyleSheet("background-color: #ffd700; color: black; font-weight: bold;")
-        self.brute_force_btn.clicked.connect(self.run_brute_force)
-        top_layout.addWidget(self.brute_force_btn)
-
-        top_layout.addStretch()
-        main_layout.addLayout(top_layout)
-
-        # --- 權重設定區 (第二排) ---
-        weight_layout = QHBoxLayout()
-        
-        weight_layout.addWidget(QLabel("指標權重設定 ->"))
-        
-        weight_layout.addWidget(QLabel("  W1 數量平衡 (邊數):"))
-        self.w1_input = QDoubleSpinBox()
-        self.w1_input.setRange(0.0, 10.0) 
-        self.w1_input.setSingleStep(0.1)
-        self.w1_input.setValue(0.3)
-        weight_layout.addWidget(self.w1_input)
-
-        weight_layout.addWidget(QLabel("  W2 拓樸平衡 (分散度):"))
-        self.w2_input = QDoubleSpinBox()
-        self.w2_input.setRange(0.0, 10.0)
-        self.w2_input.setSingleStep(0.1)
-        self.w2_input.setValue(0.3)
-        weight_layout.addWidget(self.w2_input)
-
-        weight_layout.addWidget(QLabel("  W3 效能平衡 (最壞直徑):"))
-        self.w3_input = QDoubleSpinBox()
-        self.w3_input.setRange(0.0, 10.0)
-        self.w3_input.setSingleStep(0.1)
-        self.w3_input.setValue(0.4)
-        weight_layout.addWidget(self.w3_input)
-        
-        weight_layout.addStretch()
-        main_layout.addLayout(weight_layout)
-
-        # --- 繪圖區 ---
-        self.scene = QGraphicsScene()
-        self.view = QGraphicsView(self.scene)
-        self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        main_layout.addWidget(self.view)
-
-        # --- 底部資訊區 ---
-        info_layout = QHBoxLayout()
-        log_layout = QVBoxLayout()
-        log_layout.addWidget(QLabel("系統紀錄 (包含評估指標分數)"))
-        self.output_log = QTextEdit()
-        self.output_log.setReadOnly(True)
-        log_layout.addWidget(self.output_log)
-        info_layout.addLayout(log_layout, 2)
-
-        matrix_layout = QVBoxLayout()
-        matrix_layout.addWidget(QLabel("鄰接矩陣 (Adjacency Matrix)："))
-        self.matrix_display = QTextEdit()
-        self.matrix_display.setReadOnly(True)
-        self.matrix_display.setFont(QFont("Courier New", 13, QFont.Weight.Bold))
-        matrix_layout.addWidget(self.matrix_display)
-        info_layout.addLayout(matrix_layout, 1)
-        
-        main_layout.addLayout(info_layout)
-        self.update_matrix_view()
-
-    def log_message(self, message):
-        self.output_log.append(message)
-        self.output_log.verticalScrollBar().setValue(self.output_log.verticalScrollBar().maximum())
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            for item in self.scene.selectedItems():
-                if isinstance(item, Node): self.remove_node(item)
-                elif isinstance(item, Link): self.remove_link(item)
-            self.update_matrix_view()
-        else:
-            super().keyPressEvent(event)
-
-    def add_new_node(self):
-        node_id = self.node_id_counter
-        self.node_id_counter += 1
-        rx, ry = random.randint(100, 500), random.randint(100, 400)
-        new_node = Node(rx, ry, node_id, self.log_message, self.create_new_link)
-        self.scene.addItem(new_node)
-        self.nodes.append(new_node)
-        self.update_matrix_view()
-
-    def create_new_link(self, node_a, node_b):
-        for u, v, _ in self.edges_data:
-            if (u == node_a and v == node_b) or (u == node_b and v == node_a): return
-        link = Link(node_a, node_b)
-        self.scene.addItem(link)
-        self.edges_data.append((node_a, node_b, link))
-        self.log_message(f"建立連線：{node_a.node_id} <-> {node_b.node_id}")
-        self.update_matrix_view()
-
-    def remove_node(self, node):
-        links_to_remove = [edge for edge in self.edges_data if edge[0] == node or edge[1] == node]
-        for edge in links_to_remove: self.remove_link(edge[2])
-        self.scene.removeItem(node)
-        if node in self.nodes: self.nodes.remove(node)
-        self.log_message(f"刪除了節點 {node.node_id}")
-
-    def remove_link(self, link):
-        link.source.remove_link(link)
-        link.target.remove_link(link)
-        self.scene.removeItem(link)
-        self.edges_data = [edge for edge in self.edges_data if edge[2] != link]
-
-    def update_matrix_view(self):
-        n = len(self.nodes)
-        if n == 0:
-            self.matrix_display.setText("等待新增節點...")
-            return
-        id_map = {node.node_id: i for i, node in enumerate(self.nodes)}
-        matrix = [[0] * n for _ in range(n)]
-        for node_a, node_b, _ in self.edges_data:
-            if node_a.node_id in id_map and node_b.node_id in id_map:
-                u, v = id_map[node_a.node_id], id_map[node_b.node_id]
-                matrix[u][v] = matrix[v][u] = 1
-
-        header = "    " + " ".join([f"{node.node_id:1}" for node in self.nodes])
-        divider = "    " + "-" * (n * 2)
-        rows = [f"{node.node_id:1} | " + " ".join(map(str, matrix[i])) for i, node in enumerate(self.nodes)]
-        self.matrix_display.setText(header + "\n" + divider + "\n" + "\n".join(rows))
+    def stop(self):
+        self._is_running = False
 
     def is_connected(self, edges_subset):
         if not self.nodes: return True
+        # 建立鄰接表
         adj = {node.node_id: [] for node in self.nodes}
         for u, v, _ in edges_subset:
             adj[u.node_id].append(v.node_id)
@@ -178,12 +45,11 @@ class MainWindow(QMainWindow):
                 if neighbor not in visited:
                     dfs(neighbor)
 
-        dfs(self.nodes[0].node_id)
+        if self.nodes:
+            dfs(self.nodes[0].node_id)
         return len(visited) == len(self.nodes)
 
     def get_max_diameter(self, edges_subset):
-        if not self.nodes: return 0
-        
         adj = {node.node_id: [] for node in self.nodes}
         for u, v, _ in edges_subset:
             adj[u.node_id].append(v.node_id)
@@ -191,135 +57,270 @@ class MainWindow(QMainWindow):
 
         max_diameter = 0
         for start_node in self.nodes:
-            if start_node.node_id not in adj: 
-                continue
-            
             visited_dist = {start_node.node_id: 0}
             queue = [start_node.node_id]
-            
             while queue:
                 curr = queue.pop(0)
                 curr_dist = visited_dist[curr]
-                
                 for neighbor in adj[curr]:
                     if neighbor not in visited_dist:
                         visited_dist[neighbor] = curr_dist + 1
                         queue.append(neighbor)
                         if visited_dist[neighbor] > max_diameter:
                             max_diameter = visited_dist[neighbor]
-                            
         return max_diameter
 
-    def run_brute_force(self):
-        k = self.k_input.value()
-        E = len(self.edges_data)
+    def format_time(self, seconds):
+        if seconds < 60: return f"{int(seconds)}s"
+        if seconds < 3600: return f"{int(seconds//60)}m {int(seconds%60)}s"
+        return f"{int(seconds//3600)}h {int((seconds%3600)//60)}m"
+
+    def run(self):
+        E_count = len(self.edges_data)
+        V_count = len(self.nodes)
         
-        if E == 0:
-            self.log_message("[提示] 沒有連線可以分組。")
-            return
-
-        total_combinations = k ** E
-        self.log_message(f"開始暴力搜尋... ({E} 條邊分成 {k} 組，共需檢查 {total_combinations} 種可能)")
-        self.log_message("[提示] 程式計算中，如果邊數超過 12 條會較花時間，請耐心等候...")
-        QApplication.processEvents() 
-
-        for _, _, link in self.edges_data:
-            link.setPen(QPen(Qt.GlobalColor.red, 2))
-
+        # 🌟 對稱性破缺：固定第一條邊在組 0，搜尋量直接變為 K^(E-1)
+        reduced_total = self.k ** (E_count - 1)
         valid_solutions = []
 
-        for assignment in itertools.product(range(k), repeat=E):
-            if len(set(assignment)) != k: continue
+        self.log_msg.emit(f"開始搜尋... (對稱性優化後需檢查 {reduced_total:,} 種可能)")
+        
+        start_time = time.time() 
+        last_update_time = start_time
+        count = 0
 
+        # 固定首位為 0，只對剩餘 E-1 條邊進行 itertools 排列
+        for rest in itertools.product(range(self.k), repeat=E_count-1):
+            if not self._is_running:
+                break
+
+            count += 1
+            assignment = (0,) + rest 
+
+            # UI 更新與速率/ETA 計算
+            if count % 5000 == 0:
+                now = time.time()
+                elapsed = now - start_time
+                if now - last_update_time >= 0.2:
+                    pct = int((count / reduced_total) * 100)
+                    speed = count / elapsed if elapsed > 0 else 0
+                    eta = (reduced_total - count) / speed if speed > 0 else 0
+                    text = f"檢查中: {count:,}/{reduced_total:,} ({pct}%) | 速率: {int(speed):,} c/s | 剩餘: {self.format_time(eta)}"
+                    self.progress_updated.emit(pct, text)
+                    last_update_time = now
+
+            # 門檻檢查：必須每組都有邊
+            if len(set(assignment)) < self.k: continue
+
+            # 連通性與指標計算
             is_valid = True
-            diameters_after_failure = []
-            
-            for group_to_remove in range(k):
-                remaining_edges = [
-                    self.edges_data[i] 
-                    for i, assigned_group in enumerate(assignment) 
-                    if assigned_group != group_to_remove
-                ]
-                
-                if not self.is_connected(remaining_edges):
+            diameters = []
+            for g_remove in range(self.k):
+                subset = [self.edges_data[i] for i, g in enumerate(assignment) if g != g_remove]
+                if not self.is_connected(subset):
                     is_valid = False
                     break
-                else:
-                    diam = self.get_max_diameter(remaining_edges)
-                    diameters_after_failure.append(diam)
+                diameters.append(self.get_max_diameter(subset))
             
             if is_valid:
-                group_sizes = [assignment.count(i) for i in range(k)]
-                avg_size = E / k
-                m1_score = sum((size - avg_size) ** 2 for size in group_sizes)
-                
-                m2_score = 0
+                # M1 數量平衡
+                group_sizes = [assignment.count(i) for i in range(self.k)]
+                m1 = sum((s - E_count/self.k)**2 for s in group_sizes)
+                # M2 拓樸平衡
+                m2 = 0
                 for node in self.nodes:
-                    node_group_counts = [0] * k
+                    node_counts = [0]*self.k
                     for i, (u, v, _) in enumerate(self.edges_data):
-                        if u == node or v == node:
-                            node_group_counts[assignment[i]] += 1
-                    avg_node_links = sum(node_group_counts) / k
-                    m2_score += sum((c - avg_node_links) ** 2 for c in node_group_counts)
-                
-                m3_score = max(diameters_after_failure) 
+                        if u == node or v == node: node_counts[assignment[i]] += 1
+                    avg_n = sum(node_counts)/self.k
+                    m2 += sum((c - avg_n)**2 for c in node_counts)
                 
                 valid_solutions.append({
-                    "assignment": assignment,
-                    "m1": m1_score,
-                    "m2": m2_score,
-                    "m3": m3_score
+                    "assignment": assignment, "m1": m1, "m2": m2, "m3": max(diameters)
                 })
 
-        if valid_solutions:
-            m1_vals = [sol["m1"] for sol in valid_solutions]
-            m2_vals = [sol["m2"] for sol in valid_solutions]
-            m3_vals = [sol["m3"] for sol in valid_solutions]
-            
-            def normalize(val, vals_list):
-                min_v, max_v = min(vals_list), max(vals_list)
-                if min_v == max_v: return 0.0
-                return (val - min_v) / (max_v - min_v)
+        final_elapsed = time.time() - start_time
+        self.progress_updated.emit(100, f"搜尋結束 | 總耗時: {self.format_time(final_elapsed)}")
 
-            raw_w1 = self.w1_input.value()
-            raw_w2 = self.w2_input.value()
-            raw_w3 = self.w3_input.value()
-            
-            total_w = raw_w1 + raw_w2 + raw_w3
-            if total_w == 0:
-                W1, W2, W3 = 0.33, 0.33, 0.33
-            else:
-                W1 = raw_w1 / total_w
-                W2 = raw_w2 / total_w
-                W3 = raw_w3 / total_w
+        if not valid_solutions:
+            self.search_finished.emit(None, 0, 0, final_elapsed)
+            return
 
-            best_solution = None
-            best_final_score = float('inf')
+        # 打分數邏輯
+        m1_v, m2_v, m3_v = [s["m1"] for s in valid_solutions], [s["m2"] for s in valid_solutions], [s["m3"] for s in valid_solutions]
+        mi1, ma1 = min(m1_v), max(m1_v)
+        mi2, ma2 = min(m2_v), max(m2_v)
+        mi3, ma3 = min(m3_v), max(m3_v)
+        
+        def norm(v, mi, ma): return (v - mi) / (ma - mi) if ma != mi else 0.0
+        W1, W2, W3 = self.weights
+        best_sol, best_score = None, float('inf')
 
-            for sol in valid_solutions:
-                n_m1 = normalize(sol["m1"], m1_vals)
-                n_m2 = normalize(sol["m2"], m2_vals)
-                n_m3 = normalize(sol["m3"], m3_vals)
-                
-                final_score = (W1 * n_m1) + (W2 * n_m2) + (W3 * n_m3)
-                
-                if final_score < best_final_score:
-                    best_final_score = final_score
-                    best_solution = sol
+        for sol in valid_solutions:
+            score = W1*norm(sol["m1"],mi1,ma1) + W2*norm(sol["m2"],mi2,ma2) + W3*norm(sol["m3"],mi3,ma3)
+            sol["final_score"] = score
+            if score < best_score:
+                best_score = score
+                best_sol = sol
 
-            valid_count = len(valid_solutions)
-            self.log_message(f"搜尋完成！共有 【{valid_count}】 種合法分法。")
-            self.log_message(f"最佳平衡解 (評估總分: {best_final_score:.3f} | 最壞直徑: {best_solution['m3']})")
-            
-            color_palette = [Qt.GlobalColor.blue, Qt.GlobalColor.green, Qt.GlobalColor.magenta, 
-                             Qt.GlobalColor.darkYellow, Qt.GlobalColor.cyan]
-            
-            for i, group_index in enumerate(best_solution["assignment"]):
-                _, _, link_item = self.edges_data[i]
-                color = color_palette[group_index % len(color_palette)]
-                link_item.setPen(QPen(color, 3))
-                
-            self.log_message(f"畫面已依照自訂權重 (W1={W1:.2f}, W2={W2:.2f}, W3={W3:.2f}) 顯示最佳分法！")
-        else:
-            
-            self.log_message(f"搜尋完成！檢查了 {total_combinations} 種可能，【0】種合法解。這張圖目前的結構無法達成條件。")
+        best_count = sum(1 for s in valid_solutions if abs(s["final_score"] - best_score) < 1e-9)
+        self.search_finished.emit(best_sol, len(valid_solutions), best_count, final_elapsed)
+
+# ==========================================
+# 主視窗 (MainWindow)
+# ==========================================
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Python Graph Editor - 最佳平衡容錯分析 (高效優化版)")
+        self.resize(1300, 800)
+        self.nodes, self.edges_data, self.node_id_counter, self.worker = [], [], 0, None
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # 控制列
+        top_layout = QHBoxLayout()
+        self.add_node_btn = self.create_btn(top_layout, "新增節點 (+)", self.add_new_node)
+        self.arrange_btn = self.create_btn(top_layout, "自動排列", self.arrange_nodes_circle)
+        top_layout.addWidget(QLabel(" 分組(K)"))
+        self.k_input = QSpinBox()
+        self.k_input.setRange(2, 5); self.k_input.setValue(2); self.k_input.setFixedSize(80, 40)
+        self.k_input.valueChanged.connect(lambda: self.update_stats_view())
+        top_layout.addWidget(self.k_input)
+        self.search_btn = self.create_btn(top_layout, "開始搜尋", self.start_background_search, "#ffd700")
+        self.stop_btn = self.create_btn(top_layout, "停止搜尋", self.stop_background_search, "#ff4c4c", text_color="white")
+        top_layout.addStretch()
+        main_layout.addLayout(top_layout)
+
+        # 權重列
+        weight_layout = QHBoxLayout()
+        self.w1_i = self.create_weight(weight_layout, "W1 數量:", 0.3)
+        self.w2_i = self.create_weight(weight_layout, "W2 拓樸:", 0.3)
+        self.w3_i = self.create_weight(weight_layout, "W3 效能:", 0.4)
+        weight_layout.addStretch()
+        main_layout.addLayout(weight_layout)
+
+        self.p_bar = QProgressBar()
+        self.p_bar.setVisible(False); self.p_bar.setRange(0, 100); self.p_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.p_bar)
+
+        self.scene = QGraphicsScene(); self.scene.setSceneRect(0, 0, 1000, 800)
+        self.view = QGraphicsView(self.scene); self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        main_layout.addWidget(self.view, stretch=7)
+
+        # 底部面板
+        info_layout = QHBoxLayout()
+        self.log_te = self.create_te(info_layout, "System Log", 4)
+        self.matrix_te = self.create_te(info_layout, "Adjacency Matrix", 2, mono=True)
+        
+        stat_box = QVBoxLayout(); stat_box.addWidget(QLabel("即時統計資訊"))
+        self.st_n = QLabel("節點數量: 0"); self.st_e = QLabel("連線數量: 0")
+        self.st_t = QLabel("可能分法: 0"); self.st_v = QLabel("合法分法: 等待...")
+        for l in [self.st_n, self.st_e, self.st_t, self.st_v]:
+            l.setFont(QFont("Arial", 11)); stat_box.addWidget(l)
+        self.st_v.setStyleSheet("color: blue; font-weight: bold;")
+        stat_box.addStretch(); info_layout.addLayout(stat_box, 1)
+        main_layout.addLayout(info_layout, stretch=3)
+
+        self.update_matrix_view(); self.update_stats_view(); self.stop_btn.setEnabled(False)
+
+    def create_btn(self, layout, txt, slot, bg=None, text_color="black"):
+        b = QPushButton(txt); b.setFixedHeight(40); b.clicked.connect(slot)
+        if bg: b.setStyleSheet(f"background-color: {bg}; color: {text_color}; font-weight: bold;")
+        layout.addWidget(b); return b
+
+    def create_weight(self, layout, txt, val):
+        layout.addWidget(QLabel(txt))
+        s = QDoubleSpinBox(); s.setRange(0, 10); s.setSingleStep(0.1); s.setValue(val)
+        layout.addWidget(s); return s
+
+    def create_te(self, layout, title, stretch, mono=False):
+        v = QVBoxLayout(); v.addWidget(QLabel(title))
+        t = QTextEdit(); t.setReadOnly(True); t.setMinimumHeight(180)
+        if mono: t.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        v.addWidget(t); layout.addLayout(v, stretch); return t
+
+    def log_message(self, msg):
+        self.log_te.append(msg); self.log_te.verticalScrollBar().setValue(self.log_te.verticalScrollBar().maximum())
+
+    def add_new_node(self):
+        self.node_id_counter += 1
+        pos = self.view.mapToScene(self.view.viewport().rect().center())
+        n = Node(pos.x(), pos.y(), self.node_id_counter - 1, self.log_message, self.create_new_link)
+        self.scene.addItem(n); self.nodes.append(n)
+        self.update_matrix_view(); self.update_stats_view()
+
+    def create_new_link(self, na, nb):
+        if any((u==na and v==nb) or (u==nb and v==na) for u,v,_ in self.edges_data): return
+        l = Link(na, nb); self.scene.addItem(l); self.edges_data.append((na, nb, l))
+        self.update_matrix_view(); self.update_stats_view()
+
+    def remove_node(self, node):
+        for e in [e for e in self.edges_data if e[0]==node or e[1]==node]: self.remove_link(e[2])
+        self.scene.removeItem(node); self.nodes.remove(node)
+        self.update_matrix_view(); self.update_stats_view()
+
+    def remove_link(self, link):
+        link.source.remove_link(link); link.target.remove_link(link)
+        self.scene.removeItem(link); self.edges_data = [e for e in self.edges_data if e[2]!=link]
+        self.update_matrix_view(); self.update_stats_view()
+
+    def arrange_nodes_circle(self):
+        if not self.nodes: return
+        c = self.view.mapToScene(self.view.viewport().rect().center())
+        r = max(150, len(self.nodes) * 20)
+        for i, n in enumerate(self.nodes):
+            a = 2 * math.pi * i / len(self.nodes)
+            n.setPos(c.x() + r * math.cos(a), c.y() + r * math.sin(a))
+
+    def update_matrix_view(self):
+        n = len(self.nodes)
+        if n == 0:
+            self.matrix_te.setText("等待節點...")
+            return
+        id_m = {nd.node_id: i for i, nd in enumerate(self.nodes)}
+        mt = [[0]*n for _ in range(n)]
+        for u, v, _ in self.edges_data:
+            if u.node_id in id_m and v.node_id in id_m:
+                mt[id_m[u.node_id]][id_m[v.node_id]] = mt[id_m[v.node_id]][id_m[u.node_id]] = 1
+        txt = "    " + " ".join([str(nd.node_id) for nd in self.nodes]) + "\n    " + "-"*(n*2) + "\n"
+        for i, row in enumerate(mt): txt += f"{self.nodes[i].node_id} | " + " ".join(map(str, row)) + "\n"
+        self.matrix_te.setText(txt)
+
+    def update_stats_view(self):
+        e, k = len(self.edges_data), self.k_input.value()
+        self.st_n.setText(f"節點數量: {len(self.nodes)}")
+        self.st_e.setText(f"連線數量: {e}")
+        self.st_t.setText(f"可能分法: {k**e if e > 0 else 0:,}")
+        self.st_v.setText("合法分法: 等待..."); self.st_v.setStyleSheet("color: blue; font-weight: bold;")
+
+    def start_background_search(self):
+        if not self.edges_data: return
+        for _, _, l in self.edges_data: l.setPen(QPen(Qt.GlobalColor.red, 2))
+        self.set_ui_enabled(False); self.p_bar.setVisible(True); self.p_bar.setValue(0)
+        w_raw = (self.w1_i.value(), self.w2_i.value(), self.w3_i.value())
+        total_w = sum(w_raw)
+        weights = (0.33, 0.33, 0.33) if total_w == 0 else [w/total_w for w in w_raw]
+        self.worker = SearchWorker(self.k_input.value(), self.edges_data, self.nodes, weights)
+        self.worker.progress_updated.connect(lambda p, t: (self.p_bar.setValue(p), self.p_bar.setFormat(t)))
+        self.worker.log_msg.connect(self.log_message)
+        self.worker.search_finished.connect(self.on_search_finished); self.worker.start()
+
+    def stop_background_search(self):
+        if self.worker: self.worker.stop(); self.stop_btn.setEnabled(False)
+
+    def set_ui_enabled(self, e):
+        for w in [self.add_node_btn, self.arrange_btn, self.search_btn, self.k_input, self.w1_i, self.w2_i, self.w3_i, self.view]:
+            w.setEnabled(e)
+        self.stop_btn.setEnabled(not e)
+
+    def on_search_finished(self, best, valid, b_count, elapsed):
+        self.p_bar.setVisible(False); self.set_ui_enabled(True)
+        self.st_v.setText(f"合法分法: {valid:,}"); self.st_v.setStyleSheet(f"color: {'green' if valid > 0 else 'red'}; font-weight: bold;")
+        self.log_message(f"--- 搜尋結束 (耗時 {elapsed:.2f}s) ---")
+        if valid > 0 and best:
+            self.log_message(f"[結果] 發現 {valid:,} 合法解 | 同分最佳解 {b_count:,} 種")
+            palette = [Qt.GlobalColor.blue, Qt.GlobalColor.green, Qt.GlobalColor.magenta, Qt.GlobalColor.darkYellow, Qt.GlobalColor.cyan]
+            for i, group in enumerate(best["assignment"]): self.edges_data[i][2].setPen(QPen(palette[group % len(palette)], 3))
